@@ -1,17 +1,3 @@
-# Copyright 2013 Dell Inc.
-# All Rights Reserved.
-#
-#    Licensed under the Apache License, Version 2.0 (the "License"); you may
-#    not use this file except in compliance with the License. You may obtain
-#    a copy of the License at
-#
-#         http://www.apache.org/licenses/LICENSE-2.0
-#
-#    Unless required by applicable law or agreed to in writing, software
-#    distributed under the License is distributed on an "AS IS" BASIS, WITHOUT
-#    WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the
-#    License for the specific language governing permissions and limitations
-#    under the License.
 
 from neutron.agent.linux import iptables_manager
 from neutron.i18n import _LE
@@ -43,6 +29,9 @@ INTERNAL_DEV_PREFIX = 'qr-'
 SNAT_INT_DEV_PREFIX = 'sg-'
 ROUTER_2_FIP_DEV_PREFIX = 'rfp-'
 
+TPROXY_CHAIN_NAME = 'PREROUTING'
+TPROXY_MARK = '0x1/0x1'
+ZORP_SERVICE_IP = '0.0.0.0'
 
 class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
     """Zorp driver for Firewall As A Service."""
@@ -195,17 +184,26 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
         for rule in fw_rules_list:
             if not rule['enabled']:
                 continue
-            iptbl_rule = self._convert_fwaas_to_iptables_rule(rule)
-            if rule['ip_version'] == 4:
-                ver = IPV4
-                table = ipt_mgr.ipv4['filter']
+            if rule['protocol'] == 'tcp'and rule['action'] == 'allow' and rule['destination_port']:
+                iptbl_rule = self._convert_fwaas_to_iptables_tproxy_rule(rule)
+                if rule['ip_version'] == 4:
+                    table = ipt_mgr.ipv4['mangle']
+                else:
+                    table = ipt_mgr.ipv6['mangle']
+                chain_name = TPROXY_CHAIN_NAME
+                table.add_rule(chain_name, iptbl_rule)
             else:
-                ver = IPV6
-                table = ipt_mgr.ipv6['filter']
-            ichain_name = self._get_chain_name(fwid, ver, INGRESS_DIRECTION)
-            ochain_name = self._get_chain_name(fwid, ver, EGRESS_DIRECTION)
-            table.add_rule(ichain_name, iptbl_rule)
-            table.add_rule(ochain_name, iptbl_rule)
+                iptbl_rule = self._convert_fwaas_to_iptables_rule(rule)
+                if rule['ip_version'] == 4:
+                    ver = IPV4
+                    table = ipt_mgr.ipv4['filter']
+                else:
+                    ver = IPV6
+                    table = ipt_mgr.ipv6['filter']
+                ichain_name = self._get_chain_name(fwid, ver, INGRESS_DIRECTION)
+                ochain_name = self._get_chain_name(fwid, ver, EGRESS_DIRECTION)
+                table.add_rule(ichain_name, iptbl_rule)
+                table.add_rule(ochain_name, iptbl_rule)
         self._enable_policy_chain(fwid, ipt_if_prefix)
 
     def _remove_default_chains(self, nsid):
@@ -215,6 +213,7 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
 
     def _remove_chains(self, fwid, ipt_mgr):
         """Remove fwaas policy chain."""
+
         for ver in [IPV4, IPV6]:
             for direction in [INGRESS_DIRECTION, EGRESS_DIRECTION]:
                 chain_name = self._get_chain_name(fwid, ver, direction)
@@ -284,6 +283,25 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
         iptables_rule = ' '.join(args)
         return iptables_rule
 
+    def _convert_fwaas_to_iptables_tproxy_rule(self, rule):
+        action = 'TPROXY'
+        args = [self._protocol_arg(rule.get('protocol')),
+                self._port_arg('dport',
+                               rule.get('protocol'),
+                               rule.get('destination_port')),
+                self._port_arg('sport',
+                               rule.get('protocol'),
+                               rule.get('source_port')),
+                self._ip_prefix_arg('s', rule.get('source_ip_address')),
+                self._ip_prefix_arg('d', rule.get('destination_ip_address')),
+                self._action_arg(action),
+                self._on_port_arg(rule.get('destination_port')),
+                self._on_ip_arg(ZORP_SERVICE_IP),
+                self._tproxy_mark_arg(TPROXY_MARK)]
+
+        iptables_rule = ' '.join(args)
+        return iptables_rule
+
     def _drop_invalid_packets_rule(self):
         return '-m state --state INVALID -j DROP'
 
@@ -309,3 +327,13 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
         if ip_prefix:
             return '-%s %s' % (direction, ip_prefix)
         return ''
+
+    def _on_port_arg(self, port):
+        loc_port = 50000 + int(port)
+        return '--on-port %s' % (loc_port)
+
+    def _on_ip_arg(self, ip):
+        return '--on-ip %s' % (ip)
+
+    def _tproxy_mark_arg(self,mark):
+        return '--tproxy-mark %s' % (mark)
