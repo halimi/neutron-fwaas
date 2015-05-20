@@ -1,0 +1,59 @@
+
+from Zorp.Core import *
+from Zorp.Finger import *
+from Zorp.Ftp import *
+from Zorp.Http import *
+from Zorp.Plug import *
+from Zorp.Pop3 import *
+from Zorp.Smtp import *
+from Zorp.Telnet import *
+from Zorp.Whois import *
+
+
+class Finger(FingerProxy):
+
+    def config(self):
+        FingerProxy.config(self)
+
+
+class Ftp(FtpProxy):
+
+    def config(self):
+        FtpProxy.config(self)
+
+
+class Http(HttpProxy):
+
+    def config(self):
+        HttpProxy.config(self)
+
+
+class Plug(PlugProxy):
+
+    def config(self):
+        PlugProxy.config(self)
+
+
+class Pop3(Pop3Proxy):
+
+    def config(self):
+        Pop3Proxy.config(self)
+
+
+class Smtp(SmtpProxy):
+
+    def config(self):
+        SmtpProxy.config(self)
+
+
+class Telnet(TelnetProxy):
+
+    def config(self):
+        TelnetProxy.config(self)
+
+
+class Whois(WhoisProxy):
+
+    def config(self):
+        WhoisProxy.config(self)
+

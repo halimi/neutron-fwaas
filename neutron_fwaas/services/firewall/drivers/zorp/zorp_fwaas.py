@@ -1,4 +1,6 @@
 
+import subprocess
+
 from neutron.agent.linux import iptables_manager
 from neutron.i18n import _LE
 from oslo_log import log as logging
@@ -32,6 +34,91 @@ ROUTER_2_FIP_DEV_PREFIX = 'rfp-'
 TPROXY_CHAIN_NAME = 'PREROUTING'
 TPROXY_MARK = '0x1/0x1'
 ZORP_SERVICE_IP = '0.0.0.0'
+
+
+class ZorpControl(object):
+
+    def __init__(self, namespace):
+        self.namespace = namespace
+
+    def start(self):
+        subprocess.call(['sudo', 'ip', 'netns', 'exec', self.namespace, 'zorpctl', 'start'])
+
+    def stop(self):
+        subprocess.call(['sudo', 'ip', 'netns', 'exec', self.namespace, 'zorpctl', 'stop'])
+
+    def restart(self):
+        subprocess.call(['sudo', 'ip', 'netns', 'exec', self.namespace, 'zorpctl', 'restart'])
+
+    def reload(self):
+        subprocess.call(['sudo', 'ip', 'netns', 'exec', self.namespace, 'zorpctl', 'reload'])
+
+
+class ZorpConfig(object):
+
+    INSTANCE = """
+def instance_%s():
+    Service('%s', %s)
+    Listener(SockAddrInet('0.0.0.0', %s), '%s', transparent=True)
+"""
+
+    def __init__(self):
+        pass
+
+    def generate_instances_conf(self, service_ports):
+        instances = ['instance_%s --policy /etc/zorp/policy.py' % service_name.replace('-','_')
+                     for service_name in service_ports.keys()]
+        instances_conf_path = '/tmp/instances.conf'
+        try:
+            with open(instances_conf_path, 'w') as instances_file:
+                instances_file.write('\n'.join(instances))
+        except IOError:
+            LOG.exception(_LE("Failed to write file: %s"), instances_conf_path)
+
+    def generate_policy_py(self, service_ports):
+        skeleton_file_path = '/tmp/policy.py.skeleton'
+        try:
+            with open(skeleton_file_path, 'r') as skeleton_file:
+                policy_skeleton = skeleton_file.read()
+        except IOError:
+            LOG.exception(_LE("Failed to read file: %s"), skeleton_file_path)
+
+        instances = []
+        for servcie_name, service_port in service_ports.items():
+            srv_port = service_port if service_port in ['21', '23', '25', '43', '79', '80', '110'] else '*'
+            instances.append(self.INSTANCE %
+                             (servcie_name.replace('-','_'),
+                              servcie_name,
+                              self._get_proxy_name(srv_port),
+                              (50000 + int(service_port)),
+                              servcie_name)
+                             )
+
+        policy = policy_skeleton + '\n'.join(instances)
+        policy_py_path = '/tmp/policy.py'
+        try:
+            with open(policy_py_path, 'w') as policy_file:
+                policy_file.write(policy)
+        except IOError:
+            LOG.exception(_LE("Failed to write file: %s"), policy_py_path)
+
+    def _get_proxy_name(self, destination_port):
+        port_proxy_map = {
+            '21': 'Ftp',
+            '23': 'Telnet',
+            '25': 'Smtp',
+            '43': 'Whois',
+            '79': 'Finger',
+            '80': 'Http',
+            '110': 'Pop3',
+            '*': 'Plug'
+        }
+        return port_proxy_map.get(destination_port)
+
+    def replace_config_files(self):
+        subprocess.call(['sudo', 'mv', '/tmp/instances.conf', '/etc/zorp/instances.conf'])
+        subprocess.call(['sudo', 'mv', '/tmp/policy.py', '/etc/zorp/policy.py'])
+
 
 class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
     """Zorp driver for Firewall As A Service."""
@@ -165,6 +252,9 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
         fwid = firewall['id']
         ipt_mgr = ipt_if_prefix['ipt']
 
+        zorp_control = ZorpControl(ipt_mgr.namespace)
+        zorp_config = ZorpConfig()
+
         #default rules for invalid packets and established sessions
         invalid_rule = self._drop_invalid_packets_rule()
         est_rule = self._allow_established_rule()
@@ -181,11 +271,13 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
                 table.add_rule(name, invalid_rule)
                 table.add_rule(name, est_rule)
 
+        service_ports = {}
         for rule in fw_rules_list:
             if not rule['enabled']:
                 continue
             if rule['protocol'] == 'tcp'and rule['action'] == 'allow' and rule['destination_port']:
                 iptbl_rule = self._convert_fwaas_to_iptables_tproxy_rule(rule)
+                service_ports[rule['id']] = rule['destination_port']
                 if rule['ip_version'] == 4:
                     table = ipt_mgr.ipv4['mangle']
                 else:
@@ -205,6 +297,11 @@ class ZorpFwaasDriver(fwaas_base.FwaasDriverBase):
                 table.add_rule(ichain_name, iptbl_rule)
                 table.add_rule(ochain_name, iptbl_rule)
         self._enable_policy_chain(fwid, ipt_if_prefix)
+        zorp_config.generate_instances_conf(service_ports)
+        zorp_config.generate_policy_py(service_ports)
+        zorp_control.stop()
+        zorp_config.replace_config_files()
+        zorp_control.start()
 
     def _remove_default_chains(self, nsid):
         """Remove fwaas default policy chain."""
